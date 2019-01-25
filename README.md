@@ -355,3 +355,132 @@ choice.user.item <- (1+alpha*purchase.freq)
 max(choice.user.item) # check the size of the largest choice weight
 search.product.table
 shop.sample
+
+## Implicit function
+
+install.packages("devtools")
+devtools::install_github("andland/implicitcf")
+library("implicitcf", lib.loc="~/R/win-library/3.4")
+
+implicitcf <- function(R, alpha = 1, C1 = alpha * R, P = R,
+                       f = 10, lambda = 0,
+                       init_stdv = ifelse(lambda == 0, 0.01, 1 / sqrt(2 * lambda)),
+                       max_iters = 10, parallel = FALSE, quiet = TRUE) {
+  ##### check C1 and P dimensions
+  stopifnot(all(dim(C1) == dim(P)))
+  
+  ###### C1, and P are sparseMatrix class
+  if (!inherits(C1, "sparseMatrix")) {
+    C1 = Matrix::Matrix(C1, sparse = TRUE)
+  }
+  if (!inherits(P, "sparseMatrix")) {
+    P = Matrix::Matrix(P, sparse = TRUE)
+  }
+  
+  ###### check C1 and P 0's match up
+  if (!all(Matrix::which(C1 > 0) == Matrix::which(P > 0))) {
+    warning("non-zero elements of C1 and P do not match. This could cause issues in the algorithm")
+  }
+  
+ ###### R doesn't need to be specified as long as C1 and P are
+  if (!missing(R)) {
+    rm(R)
+  }
+  
+  if (parallel) {
+    if (!requireNamespace("foreach", quietly = TRUE)) {
+      warning("foreach package not installed. Setting parallel = FALSE.\n",
+              "Install foreach package to use parallel.")
+      parallel = FALSE
+    }
+  }
+  
+  nrows = nrow(P)
+  ncols = ncol(P)
+  
+  ###### f is typically small, so I don't know if this helps
+  Lambda = Matrix::Diagonal(f, x = lambda)
+  ###### Lambda = diag(x = lambda, f, f)
+  CP = C1 * P + P
+  
+  ###### only initialize X so that it knows the size
+  X = Matrix::Matrix(rnorm(nrows * f, 0, init_stdv), nrows, f)
+  Y = Matrix::Matrix(rnorm(ncols * f, 0, init_stdv), ncols, f)
+  
+  loss_trace = rep(NA, max_iters)
+  for (iter in 1:max_iters) {
+    if (!quiet) {
+      cat("Iter", iter, "-- ")
+    }
+    
+    YtY = Matrix::crossprod(Y)
+    if (parallel) {
+      X = foreach::`%dopar%`(
+        foreach::foreach(u = 1:nrows, .combine = rbind),
+        {
+          inv = YtY + Matrix::t(Y) %% diag(C1[u, ]) %% Y + Lambda
+          rhs = Matrix::t(Y) %*% CP[u, ]
+          Matrix::t(Matrix::solve(inv, rhs))
+        }
+      )
+    } else {
+      for (u in 1:nrows) {
+        # TODO: compare diag(C1[u, ]) to Diagonal(x = C1[u, ]) since Diagonal keeps 0's
+        inv = YtY + Matrix::t(Y) %% diag(C1[u, ]) %% Y + Lambda
+        
+        # TODO: compare to rhs = t(Y) %*% CP[u, ], to make sure it gives same results
+        # rhs = t(Y) %% diag(C1[u, ] + 1) %% P[u, ]
+        rhs = Matrix::t(Y) %*% CP[u, ]
+        
+        x = Matrix::solve(inv, rhs)
+        X[u, ] = as.numeric(x)
+      }
+    }
+    
+    XtX = Matrix::crossprod(X)
+    if (parallel) {
+      #       Y = foreach::foreach(i = 1:ncols, .combine = rbind) %dopar% {
+      #         inv = XtX + Matrix::t(X) %% diag(C1[, i]) %% X + Lambda
+      #         rhs = Matrix::t(X) %*% CP[, i]
+      #         Matrix::t(Matrix::solve(inv, rhs))
+      #       }
+      Y = foreach::`%dopar%`(
+        foreach::foreach(i = 1:ncols, .combine = rbind),
+        {
+          inv = XtX + Matrix::t(X) %% diag(C1[, i]) %% X + Lambda
+          rhs = Matrix::t(X) %*% CP[, i]
+          Matrix::t(Matrix::solve(inv, rhs))
+        }
+      )
+    } else {
+      for (i in 1:ncols) {
+        # TODO: compare diag(C1[, i]) to Diagonal(x = C1[, i]) since Diagonal keeps 0's
+        inv = XtX + Matrix::t(X) %% diag(C1[, i]) %% X + Lambda
+        
+        # TODO: compare to rhs = t(X) %*% CP[, i], to make sure it gives same results
+        # rhs = t(X) %% diag(C1[, i] + 1) %% P[, i]
+        rhs = Matrix::t(X) %*% CP[, i]
+        
+        y = Matrix::solve(inv, rhs)
+        Y[i, ] = as.numeric(y)
+      }
+    }
+    
+    loss_trace[iter] = sum((C1 + 1) * (P - Matrix::tcrossprod(X, Y))^2) + lambda * (sum(X^2) + sum(Y^2))
+    if (!quiet) {
+      cat("Loss =", loss_trace[iter], "\n")
+    }
+  }
+  structure(
+    list(
+      X = X,
+      Y = Y,
+      loss_trace = loss_trace,
+      # alpha = alpha,
+      f = f,
+      lambda = lambda
+    ),
+    class = "implicitcf"
+  )
+}
+
